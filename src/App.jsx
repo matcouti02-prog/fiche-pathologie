@@ -4,6 +4,10 @@ const TEAL = "#0D9488";
 const TEAL_LIGHT = "#CCFBF1";
 const TEAL_DARK = "#0F766E";
 
+// ⚠️ REMPLACEZ CES VALEURS PAR LES VÔTRES
+const SUPABASE_URL = "https://VOTRE_ID.supabase.co";
+const SUPABASE_KEY = "VOTRE_CLE_PUBLIQUE";
+
 const SPECIALITES = [
   { id:"all",        label:"Toutes",            icon:"🗂️" },
   { id:"cardio",     label:"Cardiologie",        icon:"❤️" },
@@ -41,30 +45,43 @@ function detectSpecialite(fiche) {
   return "all";
 }
 
-// ── Stockage local (remplace window.storage de Claude.ai) ───────────────────
-const storage = {
-  async get(key) {
-    try { const v = localStorage.getItem(key); return v ? { value: v } : null; } catch { return null; }
-  },
-  async set(key, value) {
-    try { localStorage.setItem(key, value); return true; } catch { return null; }
-  },
-  async list(prefix) {
-    try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith(prefix));
-      return { keys };
-    } catch { return { keys: [] }; }
-  },
-  async delete(key) {
-    try { localStorage.removeItem(key); return true; } catch { return null; }
-  }
-};
+// ── Supabase ─────────────────────────────────────────────────────────────────
+async function supabaseFetch(path, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) throw new Error(`Supabase error ${res.status}`);
+  return res.json();
+}
 
-// ── API Claude ───────────────────────────────────────────────────────────────
-const SYSTEM_INTRO = `Tu es un médecin expert. L'utilisateur peut écrire avec des fautes d'orthographe ou en langage courant. Identifie toujours la pathologie correcte. Génère UNIQUEMENT un JSON valide :
-{"titre_corrige": "Nom médical officiel", "intro": "2-3 phrases présentant la pathologie pour un étudiant en médecine."}`;
+async function loadFiches() {
+  return supabaseFetch("fiches?select=*&order=created_at.desc");
+}
 
-const SYSTEM_FICHE = `Tu es un assistant médical expert. Utilise HAS, ESC, AHA, OMS, UpToDate, Cochrane.
+async function saveFicheSupabase(data) {
+  return supabaseFetch("fiches", {
+    method: "POST",
+    headers: { "Prefer": "return=representation" },
+    body: JSON.stringify({
+      titre: data.titre,
+      specialite: detectSpecialite(data),
+      data: data,
+    }),
+  });
+}
+
+// ── Gemini API ───────────────────────────────────────────────────────────────
+const PROMPT_INTRO = (query) => `Tu es un médecin expert. L'utilisateur peut écrire avec des fautes. Identifie la pathologie correcte. Réponds UNIQUEMENT en JSON valide :
+{"titre_corrige": "Nom médical officiel", "intro": "2-3 phrases présentant la pathologie pour un étudiant en médecine."}
+Pathologie : ${query}`;
+
+const PROMPT_FICHE = (titre) => `Tu es un assistant médical expert. Utilise HAS, ESC, AHA, OMS, UpToDate, Cochrane.
 Réponds UNIQUEMENT en JSON valide, sans backticks, sans texte autour.
 Règles : chaque tableau a minimum 1 élément, JSON syntaxiquement parfait.
 Structure EXACTE :
@@ -96,11 +113,11 @@ Structure EXACTE :
     "pronostic": "Pronostic en 1-2 phrases."
   },
   "points_cles": ["Clé 1","Clé 2","Clé 3","Clé 4","Clé 5"]
-}`;
+}
+Génère la fiche pour : "${titre}"`;
 
 function extractJSON(text) {
-  let clean = text.trim()
-    .replace(/^```json\s*/i,"").replace(/^```\s*/,"").replace(/\s*```$/,"").trim();
+  let clean = text.trim().replace(/^```json\s*/i,"").replace(/^```\s*/,"").replace(/\s*```$/,"").trim();
   const start = clean.indexOf("{"), end = clean.lastIndexOf("}");
   if (start===-1||end===-1) throw new Error("Aucun JSON trouvé");
   clean = clean.slice(start,end+1);
@@ -108,38 +125,45 @@ function extractJSON(text) {
   catch { return JSON.parse(clean.replace(/:\s*"([^"]*)\n([^"]*)"/g,': "$1 $2"')); }
 }
 
-async function callClaudeOnce(systemPrompt, userText, apiKey) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST",
-    headers:{
-      "Content-Type":"application/json",
-      "anthropic-version":"2023-06-01",
-      "anthropic-dangerous-direct-browser-access":"true",
-      "x-api-key": apiKey,
-    },
-    body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:8096, system:systemPrompt, messages:[{role:"user",content:userText}] }),
-  });
+async function callGemini(prompt, apiKey) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 8192 },
+      }),
+    }
+  );
   const data = await res.json();
-  if (!res.ok) throw new Error(`API ${res.status} : ${data.error?.message||JSON.stringify(data)}`);
-  const text = data.content.filter(b=>b.type==="text").map(b=>b.text).join("");
-  return extractJSON(text);
+  if (!res.ok) {
+    if (res.status === 400) throw new Error("Clé API Gemini invalide. Vérifiez sur aistudio.google.com");
+    if (res.status === 429) throw new Error("Quota Gemini dépassé. Réessayez dans quelques minutes.");
+    throw new Error(`Erreur Gemini ${res.status} : ${JSON.stringify(data.error || data)}`);
+  }
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!text) throw new Error("Réponse vide de Gemini");
+  return text;
 }
 
-async function callClaude(systemPrompt, userText, apiKey, maxRetries=3) {
+async function callGeminiJSON(prompt, apiKey, maxRetries = 3) {
   let lastError;
-  for (let i=0;i<maxRetries;i++) {
-    try { return await callClaudeOnce(systemPrompt,userText,apiKey); }
-    catch(e) {
-      lastError=e;
-      if (e.message.includes("401")||e.message.includes("403")) throw new Error("Clé API invalide. Vérifiez sur console.anthropic.com");
-      if (e.message.includes("429")) throw new Error("Crédits épuisés. Rechargez sur console.anthropic.com");
-      if (i<maxRetries-1) await new Promise(r=>setTimeout(r,1000*(i+1)));
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const text = await callGemini(prompt, apiKey);
+      return extractJSON(text);
+    } catch(e) {
+      lastError = e;
+      if (e.message.includes("invalide") || e.message.includes("400")) throw e;
+      if (i < maxRetries - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
   throw lastError;
 }
 
-// ── Impression PDF ───────────────────────────────────────────────────────────
+// ── Impression PDF ────────────────────────────────────────────────────────────
 function printFiche(data) {
   const w = window.open("","_blank","width=900,height=700");
   w.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Fiche – ${data.titre}</title>
@@ -193,7 +217,7 @@ function printFiche(data) {
   w.document.close();
 }
 
-// ── UI helpers ───────────────────────────────────────────────────────────────
+// ── UI Helpers ────────────────────────────────────────────────────────────────
 const SectionTitle = ({n,title}) => (
   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
     <div style={{background:TEAL,color:"white",borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0}}>{n}</div>
@@ -279,7 +303,7 @@ function FicheHTML({d}) {
 }
 
 function BiblioCard({fiche,onOpen}) {
-  const date = new Date(fiche.savedAt).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"});
+  const date = new Date(fiche.created_at).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"});
   const sp = SPECIALITES.find(s=>s.id===detectSpecialite(fiche.data))||SPECIALITES[0];
   return (
     <div style={{background:"white",border:"1px solid #E2E8F0",borderRadius:12,padding:"13px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,boxShadow:"0 1px 3px rgba(0,0,0,.04)"}}>
@@ -301,7 +325,7 @@ function BiblioCard({fiche,onOpen}) {
   );
 }
 
-// ── App principal ─────────────────────────────────────────────────────────────
+// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("generate");
   const [query, setQuery] = useState("");
@@ -316,60 +340,71 @@ export default function App() {
   const [searchBiblio, setSearchBiblio] = useState("");
   const [filtreSpecialite, setFiltreSpecialite] = useState("all");
   const [filtreOpen, setFiltreOpen] = useState(false);
-  const [apiKey, setApiKey] = useState(() => { try { return localStorage.getItem("anthropic_key")||""; } catch { return ""; } });
+  const [apiKey, setApiKey] = useState(() => { try { return localStorage.getItem("gemini_key")||""; } catch { return ""; } });
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [keyInput, setKeyInput] = useState("");
 
   useEffect(() => {
-    (async () => {
-      try {
-        const keys = await storage.list("fiche:");
-        const all = await Promise.all((keys?.keys||[]).map(async k => {
-          try { const r = await storage.get(k); return r?JSON.parse(r.value):null; } catch { return null; }
-        }));
-        setFiches(all.filter(Boolean).sort((a,b)=>b.savedAt-a.savedAt));
-      } catch {}
-      setLoadingStorage(false);
-    })();
+    loadFiches()
+      .then(data => setFiches(data||[]))
+      .catch(() => setFiches([]))
+      .finally(() => setLoadingStorage(false));
   }, []);
-
-  const saveFiche = async (data) => {
-    const id = `fiche:${Date.now()}`;
-    const entry = {id,data,savedAt:Date.now()};
-    try { await storage.set(id,JSON.stringify(entry)); } catch {}
-    setFiches(prev=>[entry,...prev]);
-  };
 
   const saveKey = () => {
     const k = keyInput.trim();
-    if (!k.startsWith("sk-ant-")) { alert("Clé invalide. Elle doit commencer par 'sk-ant-'"); return; }
-    try { localStorage.setItem("anthropic_key",k); } catch {}
+    if (!k.startsWith("AIza")) { alert("Clé invalide. Elle doit commencer par 'AIza'"); return; }
+    try { localStorage.setItem("gemini_key", k); } catch {}
     setApiKey(k); setShowKeyModal(false); setKeyInput("");
   };
 
   const removeKey = () => {
-    try { localStorage.removeItem("anthropic_key"); } catch {}
+    try { localStorage.removeItem("gemini_key"); } catch {}
     setApiKey("");
   };
+
+  const normalize = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[\s\-_'']/g,"");
 
   const generate = async () => {
     if (!query.trim()) return;
     if (!apiKey) { setShowKeyModal(true); return; }
     setError(null); setFiche(null); setIntro(""); setStep("loadingIntro");
     try {
-      const introData = await callClaude(SYSTEM_INTRO,`Pathologie : ${query}`,apiKey);
-      const pathologieCorrigee = introData.titre_corrige||query;
-      const normalize = s=>s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[\s\-_'']/g,"");
-      const existing = fiches.find(f=>normalize(f.data.titre)===normalize(pathologieCorrigee));
-      if (existing) { setIntro(introData.intro); setFiche(existing.data); setStep("done"); setAlreadyExisted(true); return; }
-      setAlreadyExisted(false); setIntro(introData.intro); setStep("loadingFiche");
-      const ficheData = await callClaude(SYSTEM_FICHE,`Génère une fiche médicale complète pour : "${pathologieCorrigee}". Base-toi sur HAS, ESC, AHA, OMS, UpToDate, Cochrane. UNIQUEMENT le JSON.`,apiKey);
-      setFiche(ficheData); await saveFiche(ficheData); setStep("done");
-    } catch(e) { setError(e.message); setStep("idle"); }
+      // Étape 1 : identifier la pathologie
+      const introData = await callGeminiJSON(PROMPT_INTRO(query), apiKey);
+      const titreCorroge = introData.titre_corrige || query;
+
+      // Étape 2 : chercher dans Supabase
+      setStep("loadingFiche");
+      const existing = fiches.find(f => normalize(f.data.titre) === normalize(titreCorroge));
+      if (existing) {
+        setIntro(introData.intro);
+        setFiche(existing.data);
+        setAlreadyExisted(true);
+        setStep("done");
+        return;
+      }
+
+      // Étape 3 : générer via Gemini
+      setAlreadyExisted(false);
+      setIntro(introData.intro);
+      const ficheData = await callGeminiJSON(PROMPT_FICHE(titreCorroge), apiKey);
+
+      // Étape 4 : sauvegarder dans Supabase
+      await saveFicheSupabase(ficheData);
+      const updated = await loadFiches();
+      setFiches(updated||[]);
+      setFiche(ficheData);
+      setStep("done");
+    } catch(e) {
+      setError(e.message);
+      setStep("idle");
+    }
   };
 
   const reset = () => { setStep("idle"); setQuery(""); setFiche(null); setIntro(""); setError(null); setAlreadyExisted(false); };
   const isLoading = step==="loadingIntro"||step==="loadingFiche";
+
   const TabBtn = ({id,label,count}) => (
     <button onClick={()=>{setTab(id);setViewFiche(null);}} style={{flex:1,padding:"10px 0",fontSize:13,fontWeight:700,border:"none",cursor:"pointer",fontFamily:"inherit",borderBottom:`3px solid ${tab===id?TEAL:"transparent"}`,background:"white",color:tab===id?TEAL:"#64748B"}}>
       {label}{count!=null&&<span style={{marginLeft:6,background:tab===id?TEAL:"#E2E8F0",color:tab===id?"white":"#64748B",borderRadius:20,padding:"1px 8px",fontSize:10,fontWeight:700}}>{count}</span>}
@@ -379,24 +414,29 @@ export default function App() {
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#F0FDFA,#F8FAFC,#EFF6FF)",fontFamily:"'Segoe UI',system-ui,sans-serif",paddingBottom:60}}>
 
-      {/* Modale clé API */}
+      {/* Modale clé Gemini */}
       {showKeyModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
           <div style={{background:"white",borderRadius:16,padding:28,maxWidth:480,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}}>
             <div style={{fontSize:28,marginBottom:8,textAlign:"center"}}>🔑</div>
-            <h2 style={{margin:"0 0 6px",fontSize:18,fontWeight:800,color:"#1E293B",textAlign:"center"}}>Clé API requise pour générer</h2>
-            <p style={{margin:"0 0 16px",fontSize:13,color:"#64748B",textAlign:"center",lineHeight:"19px"}}>La bibliothèque est <strong>gratuite et accessible à tous</strong>.<br/>Pour générer de nouvelles fiches, entrez votre clé API Anthropic.</p>
+            <h2 style={{margin:"0 0 6px",fontSize:18,fontWeight:800,color:"#1E293B",textAlign:"center"}}>Clé API Gemini requise</h2>
+            <p style={{margin:"0 0 16px",fontSize:13,color:"#64748B",textAlign:"center",lineHeight:"19px"}}>
+              La bibliothèque est <strong>gratuite et accessible à tous</strong>.<br/>
+              Pour <strong>générer de nouvelles fiches</strong>, entrez votre clé API Gemini.<br/>
+              La fiche générée sera <strong>partagée avec tous les utilisateurs</strong> 🌍
+            </p>
             <div style={{background:"#F8FAFC",borderRadius:10,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#64748B",lineHeight:"18px"}}>
-              <strong style={{color:"#1E293B"}}>Obtenir une clé gratuite :</strong><br/>
-              1. Allez sur <strong>console.anthropic.com</strong><br/>
-              2. Créez un compte → "API Keys" → "Create Key"<br/>
-              <span style={{color:TEAL,fontWeight:600}}>🎁 5$ de crédits offerts (~70 fiches gratuites)</span>
+              <strong style={{color:"#1E293B"}}>Obtenir une clé 100% gratuite :</strong><br/>
+              1. Allez sur <strong>aistudio.google.com</strong><br/>
+              2. Connectez-vous avec Google<br/>
+              3. Cliquez "Get API Key" → "Create API Key"<br/>
+              <span style={{color:TEAL,fontWeight:600}}>🎁 Quota gratuit : ~400 fiches/jour</span>
             </div>
-            <input value={keyInput} onChange={e=>setKeyInput(e.target.value)} placeholder="sk-ant-api03-..." type="password"
+            <input value={keyInput} onChange={e=>setKeyInput(e.target.value)} placeholder="AIzaSy..." type="password"
               style={{width:"100%",border:"2px solid #E2E8F0",borderRadius:9,padding:"11px 14px",fontSize:13,outline:"none",fontFamily:"monospace",boxSizing:"border-box",marginBottom:12}}/>
             <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>{setShowKeyModal(false);setKeyInput("");}} style={{flex:1,background:"#F8FAFC",border:"1px solid #E2E8F0",borderRadius:9,padding:"10px",fontSize:13,color:"#64748B",cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>Annuler</button>
-              <button onClick={saveKey} disabled={!keyInput.trim()} style={{flex:2,background:keyInput.trim()?`linear-gradient(135deg,${TEAL},${TEAL_DARK})`:"#CBD5E1",border:"none",borderRadius:9,padding:"10px",fontSize:13,color:"white",cursor:keyInput.trim()?"pointer":"not-allowed",fontFamily:"inherit",fontWeight:700}}>Enregistrer →</button>
+              <button onClick={()=>{setShowKeyModal(false);setKeyInput("");}} style={{flex:1,background:"#F8FAFC",border:"1px solid #E2E8F0",borderRadius:9,padding:"10px",fontSize:13,color:"#64748B",cursor:"pointer",fontWeight:600}}>Annuler</button>
+              <button onClick={saveKey} disabled={!keyInput.trim()} style={{flex:2,background:keyInput.trim()?`linear-gradient(135deg,${TEAL},${TEAL_DARK})`:"#CBD5E1",border:"none",borderRadius:9,padding:"10px",fontSize:13,color:"white",cursor:keyInput.trim()?"pointer":"not-allowed",fontWeight:700}}>Enregistrer →</button>
             </div>
           </div>
         </div>
@@ -409,16 +449,16 @@ export default function App() {
             <span style={{fontSize:26}}>🩺</span>
             <div>
               <h1 style={{margin:0,fontSize:21,fontWeight:800}}>Générateur de Fiches Pathologies</h1>
-              <p style={{margin:0,fontSize:11,opacity:.8}}>HAS · ESC · AHA · OMS · UpToDate · Cochrane · Powered by Claude AI</p>
+              <p style={{margin:0,fontSize:11,opacity:.8}}>HAS · ESC · AHA · OMS · UpToDate · Cochrane · Powered by Gemini AI</p>
             </div>
           </div>
           {apiKey?(
             <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",borderRadius:20,padding:"5px 12px",flexShrink:0}}>
-              <span style={{fontSize:11,color:"white",fontWeight:600}}>✅ Clé active</span>
+              <span style={{fontSize:11,color:"white",fontWeight:600}}>✅ Clé Gemini active</span>
               <button onClick={removeKey} style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:10,padding:"2px 8px",fontSize:10,color:"white",cursor:"pointer"}}>Changer</button>
             </div>
           ):(
-            <button onClick={()=>setShowKeyModal(true)} style={{background:"rgba(255,255,255,0.2)",border:"1px solid rgba(255,255,255,0.4)",borderRadius:20,padding:"6px 14px",fontSize:11,color:"white",cursor:"pointer",fontWeight:600,flexShrink:0}}>🔑 Ajouter ma clé API</button>
+            <button onClick={()=>setShowKeyModal(true)} style={{background:"rgba(255,255,255,0.2)",border:"1px solid rgba(255,255,255,0.4)",borderRadius:20,padding:"6px 14px",fontSize:11,color:"white",cursor:"pointer",fontWeight:600,flexShrink:0}}>🔑 Ajouter ma clé Gemini</button>
           )}
         </div>
       </div>
@@ -450,14 +490,18 @@ export default function App() {
                 </div>
               </div>
             )}
+
             {error&&<div style={{padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:8,color:"#DC2626",fontSize:12,marginBottom:12}}>{error}</div>}
+
             {step==="loadingIntro"&&<div style={{textAlign:"center",padding:"30px 0"}}><div style={{fontSize:34}}>⚕️</div><p style={{color:TEAL,fontWeight:600,fontSize:14,margin:"10px 0 4px"}}>Analyse de la pathologie…</p></div>}
+
             {(step==="showIntro"||step==="loadingFiche"||step==="done")&&intro&&(
               <div style={{background:`linear-gradient(135deg,${TEAL}15,${TEAL}05)`,border:`1px solid ${TEAL}30`,borderRadius:14,padding:"16px 20px",marginBottom:16}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}><span style={{fontSize:18}}>🔬</span><span style={{fontSize:13,fontWeight:700,color:TEAL,textTransform:"uppercase"}}>{fiche?.titre||query}</span></div>
                 <p style={{margin:0,fontSize:13,color:"#1E293B",lineHeight:"20px"}}>{intro}</p>
               </div>
             )}
+
             {step==="loadingFiche"&&(
               <div style={{textAlign:"center",padding:"14px 0"}}>
                 <p style={{color:TEAL,fontWeight:600,fontSize:13,margin:"0 0 8px"}}>📋 Génération de la fiche complète…</p>
@@ -466,6 +510,7 @@ export default function App() {
                 </div>
               </div>
             )}
+
             {step==="done"&&fiche&&(
               <>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8}}>
@@ -478,11 +523,12 @@ export default function App() {
                 <FicheHTML d={fiche}/>
               </>
             )}
+
             {step==="idle"&&(
               <div style={{textAlign:"center",color:"#94A3B8",paddingTop:10}}>
                 <div style={{fontSize:44}}>📋</div>
                 <p style={{fontSize:13}}>Entrez une pathologie pour générer votre fiche médicale complète</p>
-                {!apiKey&&<p style={{fontSize:12,color:TEAL,fontWeight:600,marginTop:6,cursor:"pointer"}} onClick={()=>setShowKeyModal(true)}>🔑 Ajouter ma clé API pour commencer →</p>}
+                {!apiKey&&<p style={{fontSize:12,color:TEAL,fontWeight:600,marginTop:6,cursor:"pointer"}} onClick={()=>setShowKeyModal(true)}>🔑 Ajouter ma clé Gemini gratuite pour commencer →</p>}
               </div>
             )}
           </>
@@ -500,7 +546,7 @@ export default function App() {
                 <FicheHTML d={viewFiche.data}/>
               </>
             ):loadingStorage?(
-              <div style={{textAlign:"center",padding:"40px 0",color:"#94A3B8"}}><div style={{fontSize:32}}>⏳</div><p>Chargement…</p></div>
+              <div style={{textAlign:"center",padding:"40px 0",color:"#94A3B8"}}><div style={{fontSize:32}}>⏳</div><p>Chargement de la bibliothèque…</p></div>
             ):(
               <>
                 <div style={{background:"white",borderRadius:12,padding:"14px 16px",marginBottom:12,border:"1px solid #E2E8F0"}}>
@@ -508,6 +554,7 @@ export default function App() {
                     placeholder="🔍 Rechercher une pathologie dans la bibliothèque…"
                     style={{width:"100%",border:"2px solid #E2E8F0",borderRadius:9,padding:"9px 14px",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
                 </div>
+
                 <div style={{marginBottom:14,position:"relative"}}>
                   <button onClick={()=>setFiltreOpen(o=>!o)}
                     style={{display:"flex",alignItems:"center",gap:8,background:"white",border:`1.5px solid ${filtreSpecialite!=="all"?TEAL:"#E2E8F0"}`,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,color:filtreSpecialite!=="all"?TEAL:"#64748B",cursor:"pointer",fontFamily:"inherit",width:"100%",justifyContent:"space-between",boxSizing:"border-box"}}>
@@ -526,13 +573,15 @@ export default function App() {
                     </div>
                   )}
                 </div>
+
                 {(()=>{
                   const norm = s=>s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
                   const filtered = fiches.filter(f=>{
-                    const matchSearch = !searchBiblio||norm(f.data.titre).includes(norm(searchBiblio));
-                    const matchSp = filtreSpecialite==="all"||detectSpecialite(f.data)===filtreSpecialite;
+                    const matchSearch = !searchBiblio||norm(f.data?.titre||"").includes(norm(searchBiblio));
+                    const matchSp = filtreSpecialite==="all"||detectSpecialite(f.data||{})===filtreSpecialite;
                     return matchSearch&&matchSp;
                   });
+
                   if (fiches.length===0) return (
                     <div style={{textAlign:"center",padding:"40px 0",color:"#94A3B8"}}>
                       <div style={{fontSize:48}}>📚</div>
@@ -540,6 +589,7 @@ export default function App() {
                       <button onClick={()=>setTab("generate")} style={{background:`linear-gradient(135deg,${TEAL},${TEAL_DARK})`,color:"white",border:"none",borderRadius:10,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",marginTop:8}}>Créer une fiche →</button>
                     </div>
                   );
+
                   return (
                     <>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
