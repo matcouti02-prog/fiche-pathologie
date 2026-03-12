@@ -127,7 +127,8 @@ function extractJSON(text) {
 
 async function callGemini(prompt, apiKey) {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    // ✅ gemini-2.0-flash-lite : quota gratuit maximum (1500 req/jour)
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -370,11 +371,8 @@ export default function App() {
     if (!apiKey) { setShowKeyModal(true); return; }
     setError(null); setFiche(null); setIntro(""); setStep("loadingIntro");
     try {
-      // Étape 1 : identifier la pathologie
       const introData = await callGeminiJSON(PROMPT_INTRO(query), apiKey);
       const titreCorroge = introData.titre_corrige || query;
-
-      // Étape 2 : chercher dans Supabase
       setStep("loadingFiche");
       const existing = fiches.find(f => normalize(f.data.titre) === normalize(titreCorroge));
       if (existing) {
@@ -384,13 +382,9 @@ export default function App() {
         setStep("done");
         return;
       }
-
-      // Étape 3 : générer via Gemini
       setAlreadyExisted(false);
       setIntro(introData.intro);
       const ficheData = await callGeminiJSON(PROMPT_FICHE(titreCorroge), apiKey);
-
-      // Étape 4 : sauvegarder dans Supabase
       await saveFicheSupabase(ficheData);
       const updated = await loadFiches();
       setFiches(updated||[]);
@@ -414,7 +408,6 @@ export default function App() {
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#F0FDFA,#F8FAFC,#EFF6FF)",fontFamily:"'Segoe UI',system-ui,sans-serif",paddingBottom:60}}>
 
-      {/* Modale clé Gemini */}
       {showKeyModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
           <div style={{background:"white",borderRadius:16,padding:28,maxWidth:480,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}}>
@@ -430,7 +423,7 @@ export default function App() {
               1. Allez sur <strong>aistudio.google.com</strong><br/>
               2. Connectez-vous avec Google<br/>
               3. Cliquez "Get API Key" → "Create API Key"<br/>
-              <span style={{color:TEAL,fontWeight:600}}>🎁 Quota gratuit : ~400 fiches/jour</span>
+              <span style={{color:TEAL,fontWeight:600}}>🎁 Quota gratuit : ~750 fiches/jour</span>
             </div>
             <input value={keyInput} onChange={e=>setKeyInput(e.target.value)} placeholder="AIzaSy..." type="password"
               style={{width:"100%",border:"2px solid #E2E8F0",borderRadius:9,padding:"11px 14px",fontSize:13,outline:"none",fontFamily:"monospace",boxSizing:"border-box",marginBottom:12}}/>
@@ -442,7 +435,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Header */}
       <div style={{background:`linear-gradient(135deg,${TEAL_DARK},${TEAL})`,padding:"20px 32px 24px",color:"white"}}>
         <div style={{maxWidth:800,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -463,7 +455,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Tabs */}
       <div style={{maxWidth:800,margin:"0 auto",padding:"0 20px"}}>
         <div style={{display:"flex",background:"white",borderRadius:"0 0 12px 12px",border:"1px solid #E2E8F0",borderTop:"none",marginBottom:20,overflow:"hidden"}}>
           <TabBtn id="generate" label="✏️ Générateur"/>
@@ -472,8 +463,6 @@ export default function App() {
       </div>
 
       <div style={{maxWidth:800,margin:"0 auto",padding:"0 20px"}}>
-
-        {/* ── GÉNÉRATEUR ── */}
         {tab==="generate"&&(
           <>
             {(step==="idle"||isLoading)&&(
@@ -490,18 +479,14 @@ export default function App() {
                 </div>
               </div>
             )}
-
             {error&&<div style={{padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:8,color:"#DC2626",fontSize:12,marginBottom:12}}>{error}</div>}
-
             {step==="loadingIntro"&&<div style={{textAlign:"center",padding:"30px 0"}}><div style={{fontSize:34}}>⚕️</div><p style={{color:TEAL,fontWeight:600,fontSize:14,margin:"10px 0 4px"}}>Analyse de la pathologie…</p></div>}
-
             {(step==="showIntro"||step==="loadingFiche"||step==="done")&&intro&&(
               <div style={{background:`linear-gradient(135deg,${TEAL}15,${TEAL}05)`,border:`1px solid ${TEAL}30`,borderRadius:14,padding:"16px 20px",marginBottom:16}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}><span style={{fontSize:18}}>🔬</span><span style={{fontSize:13,fontWeight:700,color:TEAL,textTransform:"uppercase"}}>{fiche?.titre||query}</span></div>
                 <p style={{margin:0,fontSize:13,color:"#1E293B",lineHeight:"20px"}}>{intro}</p>
               </div>
             )}
-
             {step==="loadingFiche"&&(
               <div style={{textAlign:"center",padding:"14px 0"}}>
                 <p style={{color:TEAL,fontWeight:600,fontSize:13,margin:"0 0 8px"}}>📋 Génération de la fiche complète…</p>
@@ -510,7 +495,6 @@ export default function App() {
                 </div>
               </div>
             )}
-
             {step==="done"&&fiche&&(
               <>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:8}}>
@@ -523,7 +507,6 @@ export default function App() {
                 <FicheHTML d={fiche}/>
               </>
             )}
-
             {step==="idle"&&(
               <div style={{textAlign:"center",color:"#94A3B8",paddingTop:10}}>
                 <div style={{fontSize:44}}>📋</div>
@@ -534,7 +517,6 @@ export default function App() {
           </>
         )}
 
-        {/* ── BIBLIOTHÈQUE ── */}
         {tab==="biblio"&&(
           <>
             {viewFiche?(
@@ -554,7 +536,6 @@ export default function App() {
                     placeholder="🔍 Rechercher une pathologie dans la bibliothèque…"
                     style={{width:"100%",border:"2px solid #E2E8F0",borderRadius:9,padding:"9px 14px",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
                 </div>
-
                 <div style={{marginBottom:14,position:"relative"}}>
                   <button onClick={()=>setFiltreOpen(o=>!o)}
                     style={{display:"flex",alignItems:"center",gap:8,background:"white",border:`1.5px solid ${filtreSpecialite!=="all"?TEAL:"#E2E8F0"}`,borderRadius:10,padding:"9px 16px",fontSize:13,fontWeight:600,color:filtreSpecialite!=="all"?TEAL:"#64748B",cursor:"pointer",fontFamily:"inherit",width:"100%",justifyContent:"space-between",boxSizing:"border-box"}}>
@@ -573,7 +554,6 @@ export default function App() {
                     </div>
                   )}
                 </div>
-
                 {(()=>{
                   const norm = s=>s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
                   const filtered = fiches.filter(f=>{
@@ -581,7 +561,6 @@ export default function App() {
                     const matchSp = filtreSpecialite==="all"||detectSpecialite(f.data||{})===filtreSpecialite;
                     return matchSearch&&matchSp;
                   });
-
                   if (fiches.length===0) return (
                     <div style={{textAlign:"center",padding:"40px 0",color:"#94A3B8"}}>
                       <div style={{fontSize:48}}>📚</div>
@@ -589,7 +568,6 @@ export default function App() {
                       <button onClick={()=>setTab("generate")} style={{background:`linear-gradient(135deg,${TEAL},${TEAL_DARK})`,color:"white",border:"none",borderRadius:10,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",marginTop:8}}>Créer une fiche →</button>
                     </div>
                   );
-
                   return (
                     <>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
