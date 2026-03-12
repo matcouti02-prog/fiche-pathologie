@@ -5,8 +5,8 @@ const TEAL_LIGHT = "#CCFBF1";
 const TEAL_DARK = "#0F766E";
 
 // ⚠️ REMPLACEZ CES VALEURS PAR LES VÔTRES
-const SUPABASE_URL = "https://VOTRE_ID.supabase.co";
-const SUPABASE_KEY = "VOTRE_CLE_PUBLIQUE";
+const SUPABASE_URL = "https://omwwqxspnwcqfpjitqaj.supabase.co";
+const SUPABASE_KEY = "sb_publishable_UhQjoZHDpTV8ZFF-o4H6VQ_HHeK8L1W";
 
 const SPECIALITES = [
   { id:"all",        label:"Toutes",            icon:"🗂️" },
